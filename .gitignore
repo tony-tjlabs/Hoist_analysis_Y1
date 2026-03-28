@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.env
+
+# Secrets (NEVER commit)
+*secret*.json
+*credential*.json
+token.json
+service_account*.json
+
+# Raw Data (should not be in release)
+Y1_Hoist_Data_*/
+*.csv
+
+# Logs
+logs/
+*.log
+
+# Local cache (data/cache/*.parquet should be committed for cloud)
+# But we want to ignore local development cache updates
+.cache_backup/

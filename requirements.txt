@@ -1,0 +1,18 @@
+# Hoist Analysis Y1 - Cloud Release Dependencies
+
+# Web Framework
+streamlit>=1.30.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=14.0.0
+
+# Signal Processing (for metrics)
+scipy>=1.10.0
+
+# Visualization
+plotly>=5.18.0
+
+# LLM Integration (optional - graceful fallback if not installed)
+# anthropic>=0.30.0

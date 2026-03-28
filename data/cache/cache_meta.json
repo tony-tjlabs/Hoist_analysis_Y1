@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "entries": {
+    "20260326_trips": {
+      "created_at": "2026-03-28T12:00:00",
+      "rows": 1606,
+      "version": "1.0"
+    },
+    "20260326_passengers": {
+      "created_at": "2026-03-28T12:00:00",
+      "rows": 4669,
+      "version": "1.0"
+    },
+    "20260326_sward": {
+      "created_at": "2026-03-28T12:00:00",
+      "rows": 112171,
+      "version": "1.0"
+    }
+  }
+}
