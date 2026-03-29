@@ -203,6 +203,109 @@ def render_passenger_tab(
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ============================
+    # Probable 원인 분석 (토글)
+    # ============================
+    if has_multi_evidence and "classification" in filtered_df.columns:
+        prob_df = filtered_df[filtered_df["classification"] == "probable"]
+        if len(prob_df) > 0:
+            with st.expander(f"추정(Probable) {len(prob_df)}건 — 왜 확정이 아닌가?", expanded=False):
+                st.markdown(
+                    "**Probable**은 종합 점수 0.4~0.6 구간으로, "
+                    "탑승 가능성은 높지만 일부 증거가 부족하여 확정하지 못한 경우입니다."
+                )
+
+                # 패턴 분류
+                waiting_like = prob_df[
+                    (prob_df["rssi_score"] >= 0.5) & (prob_df["pressure_score"] < 0.3)
+                ]
+                coincidence = prob_df[
+                    (prob_df["rssi_score"] < 0.3) & (prob_df["pressure_score"] >= 0.5)
+                ]
+                timing_weak = prob_df[prob_df["timing_score"] < 0.3]
+                ambiguous = prob_df[
+                    (prob_df["rssi_score"] >= 0.3) & (prob_df["rssi_score"] < 0.6) &
+                    (prob_df["pressure_score"] >= 0.3) & (prob_df["pressure_score"] < 0.6)
+                ]
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    render_kpi_card(
+                        "대기자 혼동 가능",
+                        f"{len(waiting_like)}건",
+                        subtitle="RSSI 높지만 기압 불일치"
+                    )
+                with c2:
+                    render_kpi_card(
+                        "우연 기압 일치",
+                        f"{len(coincidence)}건",
+                        subtitle="RSSI 낮지만 기압 유사"
+                    )
+                with c3:
+                    render_kpi_card(
+                        "타이밍 증거 부족",
+                        f"{len(timing_weak)}건",
+                        subtitle="10초 샘플링 한계"
+                    )
+
+                st.markdown("---")
+                st.markdown("**패턴별 상세 설명**")
+
+                st.markdown(
+                    f"- **대기자 혼동** ({len(waiting_like)}건): "
+                    "호이스트 근처에서 강한 신호(RSSI)가 감지되었지만, "
+                    "기압 변화 패턴이 호이스트와 일치하지 않습니다. "
+                    "호이스트 앞에서 **대기만 하고 탑승하지 않았을** 가능성이 있습니다."
+                )
+                st.markdown(
+                    f"- **우연 기압 일치** ({len(coincidence)}건): "
+                    "호이스트 근처 신호는 약하지만, 기압 변화가 호이스트와 유사합니다. "
+                    "**계단이나 다른 호이스트**를 통해 같은 방향으로 이동한 것일 수 있습니다."
+                )
+                st.markdown(
+                    f"- **타이밍 증거 부족** ({len(timing_weak)}건, 전체 probable의 "
+                    f"{len(timing_weak)/len(prob_df)*100:.0f}%): "
+                    "RSSI와 기압은 어느 정도 일치하지만, 탑승/하차 시점의 신호 변화를 포착하지 못했습니다. "
+                    "이는 **10초 샘플링 간격의 한계**로, 15초 윈도우 안에 충분한 데이터 포인트가 없기 때문입니다. "
+                    "알고리즘의 문제가 아닌 데이터 해상도의 한계입니다."
+                )
+
+                # 대표 케이스 테이블
+                st.markdown("---")
+                st.markdown("**대표 Probable 케이스 (가장 약한 근거 순)**")
+                sample = prob_df.nsmallest(10, "composite_score")
+
+                def _get_reason(row):
+                    reasons = []
+                    if row["rssi_score"] >= 0.5 and row["pressure_score"] < 0.3:
+                        reasons.append("대기자?")
+                    if row["rssi_score"] < 0.3 and row["pressure_score"] >= 0.5:
+                        reasons.append("우연기압?")
+                    if row["timing_score"] < 0.3:
+                        reasons.append("타이밍부족")
+                    if row["rssi_score"] < 0.3:
+                        reasons.append("RSSI약")
+                    if row["pressure_score"] < 0.3:
+                        reasons.append("기압약")
+                    return ", ".join(reasons) if reasons else "복합"
+
+                sample_display = sample[
+                    ["hoist_name", "boarding_time", "rssi_score",
+                     "pressure_score", "spatial_score", "timing_score",
+                     "composite_score"]
+                ].copy()
+                sample_display["추정 원인"] = sample.apply(_get_reason, axis=1)
+                sample_display["boarding_time"] = sample_display["boarding_time"].dt.strftime("%H:%M")
+                for sc in ["rssi_score", "pressure_score", "spatial_score", "timing_score", "composite_score"]:
+                    sample_display[sc] = (sample_display[sc] * 100).round(0).astype(int).astype(str) + "%"
+                sample_display = sample_display.rename(columns={
+                    "hoist_name": "호이스트", "boarding_time": "시간",
+                    "rssi_score": "RSSI", "pressure_score": "기압",
+                    "spatial_score": "공간", "timing_score": "타이밍",
+                    "composite_score": "종합"
+                })
+                st.dataframe(sample_display, use_container_width=True, hide_index=True, height=300)
+
+    # ============================
     # Multi-Evidence Charts (NEW)
     # ============================
     if has_multi_evidence:
