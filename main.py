@@ -1,11 +1,6 @@
 """
-호이스트 분석 - Y1 (Cloud Release)
-건설현장 호이스트 운행 분석 대시보드
-
-Note: This is a cloud release version.
-- Data processing (pipeline_tab) is disabled
-- Only uses pre-cached parquet files
-- No raw data or classification algorithms included
+호이스트 분석 - Y1
+SK하이닉스 Y1 건설현장 호이스트 운행 분석 대시보드
 """
 
 import streamlit as st
@@ -17,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 st.set_page_config(page_title="호이스트 분석 - Y1", page_icon="", layout="wide", initial_sidebar_state="collapsed")
 
 
-# -- Auth ------------------------------------------------------------
+# ── Auth ────────────────────────────────────────────────────
 def check_password():
     if st.session_state.get("authenticated"):
         return True
@@ -32,15 +27,7 @@ def check_password():
             pwd = st.text_input("비밀번호", type="password")
             if st.form_submit_button("로그인", use_container_width=True, type="primary"):
                 import os
-                # Check secrets first (Streamlit Cloud), then env var
-                expected = None
-                try:
-                    expected = st.secrets.get("APP_PASSWORD")
-                except (FileNotFoundError, KeyError):
-                    pass
-                if not expected:
-                    expected = os.environ.get("APP_PASSWORD", "wonderful2$")
-                if pwd == expected:
+                if pwd == os.environ.get("APP_PASSWORD", "wonderful2$"):
                     st.session_state.authenticated = True
                     st.rerun()
                 else:
@@ -51,8 +38,8 @@ def check_password():
 if not check_password():
     st.stop()
 
-# -- Imports ---------------------------------------------------------
-from src.utils.config import CACHE_DIR, detect_available_dates, DEFAULT_DATE
+# ── Imports ─────────────────────────────────────────────────
+from src.utils.config import CLOUD_MODE, CACHE_DIR, detect_available_dates, DEFAULT_DATE
 from src.data.cache_manager import CacheManager
 from src.data.loader import load_hoist_info, load_floor_elevation
 from src.ui.styles import CUSTOM_CSS
@@ -60,9 +47,10 @@ from src.tabs.overview_tab import render_overview_tab
 from src.tabs.hoist_tab import render_hoist_tab
 from src.tabs.passenger_tab import render_passenger_tab
 from src.tabs.floor_tab import render_floor_tab
+from src.tabs.multiday_tab import render_multiday_tab
 
 
-# -- Cached loaders --------------------------------------------------
+# ── Cached loaders ──────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load_data(date_str):
     cm = CacheManager(CACHE_DIR)
@@ -73,7 +61,7 @@ def _load_static(date_str):
     return load_hoist_info(date_str), load_floor_elevation(date_str)
 
 
-# -- Main ------------------------------------------------------------
+# ── Main ────────────────────────────────────────────────────
 def main():
     if "date_str" not in st.session_state:
         avail = detect_available_dates()
@@ -85,7 +73,7 @@ def main():
     c1, c2 = st.columns([3, 1])
     with c1:
         st.title("호이스트 분석 - Y1")
-        st.caption("건설현장 호이스트 운행 대시보드")
+        st.caption("SK하이닉스 Y1 건설현장 호이스트 운행 대시보드")
     with c2:
         avail = detect_available_dates()
         if avail:
@@ -110,8 +98,8 @@ def main():
     except Exception:
         hoist_info, floor_elevations = {}, {}
 
-    # Tabs (no pipeline tab in cloud mode)
-    tab_names = ["종합 현황", "운행 분석", "탑승자 분석", "층별 분석"]
+    # Tabs
+    tab_names = ["종합 현황", "운행 분석", "탑승자 분석", "층별 분석", "멀티데이 분석"]
     tabs = st.tabs(tab_names)
 
     with tabs[0]:
@@ -122,9 +110,11 @@ def main():
         render_passenger_tab(trips_df, passengers_df, hoist_info)
     with tabs[3]:
         render_floor_tab(trips_df, passengers_df, floor_elevations)
+    with tabs[4]:
+        render_multiday_tab(CacheManager(CACHE_DIR), hoist_info)
 
     st.markdown("---")
-    st.caption("호이스트 분석 v2.0 | TJLABS Research | Cloud Mode")
+    st.caption(f"호이스트 분석 v4.5 Rate-Matching | TJLABS Research | {'Cloud' if CLOUD_MODE else 'Development'} Mode")
 
 
 if __name__ == "__main__":

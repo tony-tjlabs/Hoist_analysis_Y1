@@ -1,4 +1,4 @@
-"""종합 현황 탭 - Summary dashboard with Multi-Evidence (Dark Theme)"""
+"""종합 현황 탭 - Summary dashboard with v4.5 Rate-Matching (Dark Theme)"""
 
 import streamlit as st
 import pandas as pd
@@ -22,8 +22,10 @@ from ..analysis.metrics import (
 )
 from ..utils.llm_interpreter import (
     get_llm_status, generate_daily_summary, generate_congestion_insight,
+    generate_daily_highlight_insight, generate_congestion_context_insight,
     render_data_comment, get_cache_key, get_cached_insight, set_cached_insight
 )
+from ..utils.converters import format_hoist_name
 
 
 def render_overview_tab(
@@ -51,7 +53,7 @@ def render_overview_tab(
     # Calculate KPIs
     kpis = calculate_overview_kpis(trips_df, passengers_df, hoist_info)
 
-    # Check for multi-evidence
+    # Check for v4.5 rate-matching data
     has_multi_evidence = "composite_score" in passengers_df.columns if len(passengers_df) > 0 else False
 
     # ============================
@@ -63,7 +65,7 @@ def render_overview_tab(
         "**1행 — 운영 현황**\n"
         "- **총 운행**: 하루 동안 호이스트가 이동한 총 횟수\n"
         "- **활성 호이스트**: 1회 이상 운행한 호이스트 수 / 전체 호이스트 수\n"
-        "- **총 탑승인원**: BLE+기압 센서 기반으로 추정된 탑승 인원 (Multi-Evidence 분류)\n"
+        "- **총 탑승인원**: BLE+기압 센서 기반 Rate-Matching 알고리즘으로 추정된 탑승 인원\n"
         "- **평균 운행시간**: 호이스트 1회 운행의 평균 소요시간\n\n"
         "**2행 — 위험/혼잡 지표**\n"
         "- **최고 혼잡 시간**: 탑승인원이 가장 많은 시간대\n"
@@ -123,8 +125,8 @@ def render_overview_tab(
         bh = kpis.get("busiest_hoist", "")
         render_kpi_card(
             title="최다 운행 호이스트",
-            value=bh.split("_")[-1] if bh else "-",
-            subtitle=f"{kpis.get('busiest_hoist_trips', 0)}회 ({bh.split('_')[0] if bh else ''})",
+            value=format_hoist_name(bh) if bh else "-",
+            subtitle=f"{kpis.get('busiest_hoist_trips', 0)}회",
         )
 
     with cols2[3]:
@@ -134,8 +136,8 @@ def render_overview_tab(
             title="피크 운행 시간",
             value=peak_trip_label,
             subtitle=f"{kpis.get('peak_trips', 0)}회 운행",
-                icon=""
-            )
+            icon=""
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -177,13 +179,9 @@ def render_overview_tab(
     st.caption("층간 이동 + 탑승인원 시각화 (마커 크기/색상 = 탑승인원)")
     render_passenger_color_legend()
 
-    # Performance: filter to work hours only (6~20시) for overview
-    work_trips = trips_df[
-        (trips_df["start_time"].dt.hour >= 6) & (trips_df["start_time"].dt.hour <= 20)
-    ] if len(trips_df) > 0 else trips_df
-    fig = create_elevator_shaft_timeline(work_trips, passengers_df)
+    # 24시간 현장: 전체 시간대 표시
+    fig = create_elevator_shaft_timeline(trips_df, passengers_df)
     st.plotly_chart(fig, use_container_width=True, key="overview_shaft_timeline")
-    st.caption("작업시간(06:00~20:00) 기준 표시. 전체 시간은 운행 분석 탭에서 확인")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -340,20 +338,22 @@ def render_overview_tab(
         )
 
     with col2:
+        trips_with_pax = kpis.get("trips_with_passengers", kpis["total_trips"])
         avg_pax_per_trip = (
-            kpis["total_passengers"] / kpis["total_trips"]
-            if kpis["total_trips"] > 0 else 0
+            kpis["total_passengers"] / trips_with_pax
+            if trips_with_pax > 0 else 0
         )
         st.metric(
             "평균 탑승인원/운행",
-            f"{avg_pax_per_trip:.1f}명"
+            f"{avg_pax_per_trip:.1f}명",
+            help="빈 운행(탑승자 0명)을 제외하고 계산"
         )
 
     with col3:
-        # Calculate utilization (assume 12-hour working day)
+        # Calculate utilization (24-hour operation)
         utilization = (
             kpis["total_operating_min"] /
-            (len(hoist_info) * 60 * 12)
+            (len(hoist_info) * 60 * 24)
             if len(hoist_info) > 0 else 0
         )
         st.metric(
@@ -362,34 +362,168 @@ def render_overview_tab(
         )
 
     # ============================
-    # LLM 데이터 해석 (접힌 상태)
+    # AI 인사이트 섹션 (v5.1 강화)
     # ============================
     llm_status = get_llm_status()
     if llm_status["ready"]:
         st.markdown("<br>", unsafe_allow_html=True)
+        render_section_header("AI 인사이트")
+        render_info_tooltip(
+            "AI 인사이트",
+            "**Claude AI 기반의 데이터 해석**입니다.\n\n"
+            "- 건설현장 호이스트 운영 전문가 관점에서 분석\n"
+            "- 구조적 패턴 발견 및 효율화 제안\n"
+            "- 혼잡도 + 대기시간 교차 분석\n\n"
+            "**주의**: 집계된 통계만 분석에 사용되며, "
+            "개인정보(작업자명, 업체명 등)는 전송되지 않습니다."
+        )
 
-        # 캐시 키 생성 (날짜+핵심 지표)
-        cache_key = get_cache_key(
-            "daily_summary",
+        # 1) 오늘의 핵심 인사이트 (3~5개 bullet point)
+        highlight_cache_key = get_cache_key(
+            "daily_highlight",
             kpis["total_trips"],
             kpis["total_passengers"],
             kpis.get("peak_hour"),
         )
+        highlight_cached = get_cached_insight(highlight_cache_key)
 
-        # 캐시된 인사이트 조회
-        cached = get_cached_insight(cache_key)
-        if cached:
-            render_data_comment(cached, "오늘의 운영 요약")
+        if highlight_cached:
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, #1E3A5F 0%, #1E2330 100%);
+                border: 1px solid #3B82F6;
+                border-radius: 12px;
+                padding: 16px 20px;
+                margin-bottom: 16px;
+            ">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                    <span style="font-size: 18px;">&#128161;</span>
+                    <span style="color: #FAFAFA; font-weight: 600; font-size: 15px;">오늘의 핵심 인사이트</span>
+                    <span style="
+                        background: #3B82F6;
+                        color: white;
+                        padding: 2px 8px;
+                        border-radius: 4px;
+                        font-size: 10px;
+                        font-weight: 600;
+                    ">AI</span>
+                </div>
+                <div style="color: #E2E8F0; font-size: 13px; line-height: 1.8;">
+                    {highlight_cached}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            # LLM 호출 (spinner 표시)
-            with st.spinner("데이터 해석 중..."):
+            with st.spinner("오늘의 핵심 인사이트 생성 중..."):
                 # 평균 혼잡도 계산
                 avg_ci = 0.0
                 if congestion.get("hourly_summary"):
                     ci_values = [h.get("ci", 0) for h in congestion["hourly_summary"].values()]
                     avg_ci = sum(ci_values) / len(ci_values) if ci_values else 0.0
 
-                insight = generate_daily_summary(
+                today_stats = {
+                    "trips": kpis["total_trips"],
+                    "passengers": kpis["total_passengers"],
+                    "peak_hour": kpis.get("peak_hour"),
+                    "avg_ci": round(avg_ci, 2),
+                    "max_pax": kpis.get("max_pax_per_trip", 0),
+                }
+
+                highlight_insight = generate_daily_highlight_insight(
+                    today_stats=today_stats,
+                    yesterday_stats=None,  # 멀티데이 데이터 있으면 전달
+                    week_avg=None,
+                )
+
+                if highlight_insight:
+                    set_cached_insight(highlight_cache_key, highlight_insight)
+                    st.markdown(f"""
+                    <div style="
+                        background: linear-gradient(135deg, #1E3A5F 0%, #1E2330 100%);
+                        border: 1px solid #3B82F6;
+                        border-radius: 12px;
+                        padding: 16px 20px;
+                        margin-bottom: 16px;
+                    ">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                            <span style="font-size: 18px;">&#128161;</span>
+                            <span style="color: #FAFAFA; font-weight: 600; font-size: 15px;">오늘의 핵심 인사이트</span>
+                            <span style="
+                                background: #3B82F6;
+                                color: white;
+                                padding: 2px 8px;
+                                border-radius: 4px;
+                                font-size: 10px;
+                                font-weight: 600;
+                            ">AI</span>
+                        </div>
+                        <div style="color: #E2E8F0; font-size: 13px; line-height: 1.8;">
+                            {highlight_insight}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # 2) 혼잡도 + 대기시간 교차 분석 (확장된 컨텍스트 분석)
+        # 시간대별 데이터 준비
+        hourly_df = calculate_hourly_metrics(trips_df, passengers_df)
+        hourly_ci_dict = {}
+        hourly_pax_dict = {}
+        hourly_trips_dict = {}
+
+        if len(hourly_df) > 0:
+            for _, row in hourly_df.iterrows():
+                h = int(row["hour"])
+                hourly_pax_dict[h] = int(row.get("passenger_count", 0))
+                hourly_trips_dict[h] = int(row.get("trip_count", 0))
+
+        # 혼잡도 지수 추출
+        if congestion.get("hourly_summary"):
+            for h, data in congestion["hourly_summary"].items():
+                hourly_ci_dict[int(h)] = data.get("ci", 0)
+
+        context_cache_key = get_cache_key(
+            "congestion_context",
+            str(hourly_ci_dict),
+            str(hourly_pax_dict),
+        )
+        context_cached = get_cached_insight(context_cache_key)
+
+        if context_cached:
+            render_data_comment(context_cached, "혼잡도 x 대기시간 교차 분석")
+        else:
+            # 대기시간 데이터가 있으면 교차 분석
+            # (여기서는 hourly_wait가 없으므로 빈 dict 전달)
+            with st.spinner("교차 분석 중..."):
+                context_insight = generate_congestion_context_insight(
+                    hourly_ci=hourly_ci_dict,
+                    hourly_wait={},  # 대기시간은 hoist_tab에서 계산
+                    hourly_passengers=hourly_pax_dict,
+                    hourly_trips=hourly_trips_dict,
+                )
+
+            if context_insight:
+                set_cached_insight(context_cache_key, context_insight)
+                render_data_comment(context_insight, "혼잡도 x 탑승인원 교차 분석")
+
+        # 3) 기존 일별 요약 (더 상세한 분석용)
+        summary_cache_key = get_cache_key(
+            "daily_summary",
+            kpis["total_trips"],
+            kpis["total_passengers"],
+            kpis.get("peak_hour"),
+        )
+        summary_cached = get_cached_insight(summary_cache_key)
+
+        if summary_cached:
+            render_data_comment(summary_cached, "운영 요약 상세")
+        else:
+            with st.spinner("운영 요약 생성 중..."):
+                avg_ci = 0.0
+                if congestion.get("hourly_summary"):
+                    ci_values = [h.get("ci", 0) for h in congestion["hourly_summary"].values()]
+                    avg_ci = sum(ci_values) / len(ci_values) if ci_values else 0.0
+
+                summary_insight = generate_daily_summary(
                     total_trips=kpis["total_trips"],
                     total_passengers=kpis["total_passengers"],
                     active_hoists=kpis["active_hoists"],
@@ -400,25 +534,6 @@ def render_overview_tab(
                     building_stats=building_summary,
                 )
 
-            if insight:
-                set_cached_insight(cache_key, insight)
-                render_data_comment(insight, "오늘의 운영 요약")
-
-        # 혼잡도 해석 (별도 캐시)
-        congestion_cache_key = get_cache_key(
-            "congestion",
-            str(congestion.get("hoist_hourly_ci", {})),
-        )
-        congestion_cached = get_cached_insight(congestion_cache_key)
-        if congestion_cached:
-            render_data_comment(congestion_cached, "혼잡도 패턴 해석")
-        else:
-            with st.spinner("혼잡도 해석 중..."):
-                congestion_insight = generate_congestion_insight(
-                    hoist_hourly_ci=congestion.get("hoist_hourly_ci", {}),
-                    peak_analysis=peak,
-                    insights=congestion.get("insights", []),
-                )
-            if congestion_insight:
-                set_cached_insight(congestion_cache_key, congestion_insight)
-                render_data_comment(congestion_insight, "혼잡도 패턴 해석")
+            if summary_insight:
+                set_cached_insight(summary_cache_key, summary_insight)
+                render_data_comment(summary_insight, "운영 요약 상세")

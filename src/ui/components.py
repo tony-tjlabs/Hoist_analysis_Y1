@@ -105,7 +105,8 @@ def render_building_card(
     for hoist in hoists:
         status = "active" if hoist.get("is_active", False) else "idle"
         badge_class = "active" if status == "active" else "idle"
-        short_name = hoist["name"].split("_")[-1]
+        from ..utils.converters import format_hoist_name
+        short_name = format_hoist_name(hoist["name"])
         hoist_badges += f'<span class="hoist-badge {badge_class}">{short_name}</span>'
 
     trip_count = stats.get('trip_count', 0)
@@ -184,7 +185,7 @@ def render_data_status_card(
     st.markdown(f"""
     <div class="data-status-card">
         <span class="name">{name}</span>
-        <span class="info">{rows:,}행{size_text}</span>
+        <span class="info">{f'{rows:,}' if isinstance(rows, (int, float)) else rows}행{size_text}</span>
         <span class="status {status}">{label}</span>
     </div>
     """, unsafe_allow_html=True)
@@ -268,17 +269,21 @@ def render_evidence_bar(
     timing_score: float
 ) -> None:
     """
-    Render multi-evidence score bars (Dark Theme)
+    Render v4.5 Rate-Matching score bars (Dark Theme).
+
+    Note: In v4.5, only rate_match and delta_ratio are meaningful.
+    spatial_score and timing_score are always 0.0 (legacy compatibility).
+    RSSI is used for candidate selection only, not scoring.
 
     Args:
-        rssi_score: RSSI evidence score (0-1)
-        pressure_score: Pressure correlation score (0-1)
-        spatial_score: Spatial evidence score (0-1)
-        timing_score: Timing evidence score (0-1)
+        rssi_score: Legacy RSSI score (0-1) — kept for backward compatibility
+        pressure_score: Pressure rate-match score (= rate_match_score in v4.5)
+        spatial_score: Always 0.0 in v4.5 (not used)
+        timing_score: Always 0.0 in v4.5 (not used)
     """
     scores = [
-        ("RSSI", rssi_score, "rssi"),
-        ("기압", pressure_score, "pressure"),
+        ("Rate Match", pressure_score, "pressure"),
+        ("RSSI (참고)", rssi_score, "rssi"),
         ("공간", spatial_score, "spatial"),
         ("타이밍", timing_score, "timing"),
     ]
@@ -299,7 +304,7 @@ def render_evidence_bar(
     st.markdown(f"""
     <div class="evidence-summary-card">
         <div class="header">
-            <span class="title">Multi-Evidence 점수</span>
+            <span class="title">v4.5 Rate-Matching 점수</span>
         </div>
         {bars_html}
     </div>

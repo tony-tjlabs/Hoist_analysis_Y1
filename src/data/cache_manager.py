@@ -1,4 +1,4 @@
-"""Parquet-based cache management (Cloud Release - Load Only)"""
+"""Parquet-based cache management"""
 
 import json
 import logging
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class CacheManager:
-    """Manage Parquet caches for processed data (Load Only)"""
+    """Manage Parquet caches for processed data"""
 
     def __init__(self, cache_dir: Optional[Path] = None):
         self.cache_dir = cache_dir or CACHE_DIR
@@ -29,11 +29,33 @@ class CacheManager:
                 return json.load(f)
         return {"version": CACHE_VERSION, "entries": {}}
 
+    def _save_meta(self) -> None:
+        """Save cache metadata"""
+        with open(self._meta_file, "w") as f:
+            json.dump(self._meta, f, indent=2, default=str)
+
     def _get_cache_path(self, date_str: str, cache_type: str) -> Path:
         """Get path for cache file"""
         return self.cache_dir / f"{date_str}_{cache_type}.parquet"
 
+    def _update_meta(self, date_str: str, cache_type: str, rows: int) -> None:
+        """Update metadata for cache entry"""
+        key = f"{date_str}_{cache_type}"
+        self._meta["entries"][key] = {
+            "created_at": datetime.now().isoformat(),
+            "rows": rows,
+            "version": CACHE_VERSION
+        }
+        self._save_meta()
+
     # ========== Trips Cache ==========
+
+    def save_trips(self, trips_df: pd.DataFrame, date_str: str) -> None:
+        """Save trips DataFrame to Parquet"""
+        path = self._get_cache_path(date_str, "trips")
+        trips_df.to_parquet(path, index=False)
+        self._update_meta(date_str, "trips", len(trips_df))
+        logger.info(f"Saved {len(trips_df)} trips to {path}")
 
     def load_trips(self, date_str: str) -> Optional[pd.DataFrame]:
         """Load trips from cache"""
@@ -52,6 +74,13 @@ class CacheManager:
 
     # ========== Passengers Cache ==========
 
+    def save_passengers(self, passengers_df: pd.DataFrame, date_str: str) -> None:
+        """Save passenger classifications to Parquet"""
+        path = self._get_cache_path(date_str, "passengers")
+        passengers_df.to_parquet(path, index=False)
+        self._update_meta(date_str, "passengers", len(passengers_df))
+        logger.info(f"Saved {len(passengers_df)} passengers to {path}")
+
     def load_passengers(self, date_str: str) -> Optional[pd.DataFrame]:
         """Load passengers from cache"""
         path = self._get_cache_path(date_str, "passengers")
@@ -67,7 +96,30 @@ class CacheManager:
         logger.info(f"Loaded {len(df)} passengers from cache")
         return df
 
+    # ========== Floor Stats Cache ==========
+
+    def save_floor_stats(self, stats_df: pd.DataFrame, date_str: str) -> None:
+        """Save floor statistics to Parquet"""
+        path = self._get_cache_path(date_str, "floor_stats")
+        stats_df.to_parquet(path, index=False)
+        self._update_meta(date_str, "floor_stats", len(stats_df))
+        logger.info(f"Saved floor stats to {path}")
+
+    def load_floor_stats(self, date_str: str) -> Optional[pd.DataFrame]:
+        """Load floor stats from cache"""
+        path = self._get_cache_path(date_str, "floor_stats")
+        if not path.exists():
+            return None
+        return pd.read_parquet(path)
+
     # ========== S-Ward Cache ==========
+
+    def save_sward(self, sward_df: pd.DataFrame, date_str: str) -> None:
+        """Save preprocessed S-Ward data to Parquet"""
+        path = self._get_cache_path(date_str, "sward")
+        sward_df.to_parquet(path, index=False)
+        self._update_meta(date_str, "sward", len(sward_df))
+        logger.info(f"Saved {len(sward_df)} S-Ward records to {path}")
 
     def load_sward(self, date_str: str) -> Optional[pd.DataFrame]:
         """Load S-Ward data from cache"""
@@ -82,8 +134,29 @@ class CacheManager:
 
     # ========== T-Ward Device Cache ==========
 
+    def save_tward(self, tward_df: pd.DataFrame, date_str: str) -> None:
+        """Save T-Ward device data to Parquet"""
+        path = self._get_cache_path(date_str, "tward")
+        tward_df.to_parquet(path, index=False)
+        self._update_meta(date_str, "tward", len(tward_df))
+        logger.info(f"Saved {len(tward_df)} T-Ward records to {path}")
+
     def load_tward(self, date_str: str) -> Optional[pd.DataFrame]:
-        """Load T-Ward data from cache"""
+        """Load T-Ward data from cache
+
+        Tries to load slim version first (tward_slim), falls back to full tward.
+        Slim version contains only: insert_datetime, gateway_no, mac_address, rssi
+        """
+        # 1. Try slim version first (smaller, faster for deployment)
+        slim_path = self._get_cache_path(date_str, "tward_slim")
+        if slim_path.exists():
+            df = pd.read_parquet(slim_path)
+            if "insert_datetime" in df.columns:
+                df["insert_datetime"] = pd.to_datetime(df["insert_datetime"])
+            logger.info(f"Loaded {len(df)} T-Ward records from slim cache")
+            return df
+
+        # 2. Fall back to full version
         path = self._get_cache_path(date_str, "tward")
         if not path.exists():
             return None
@@ -96,7 +169,15 @@ class CacheManager:
     # ========== Utility Methods ==========
 
     def is_valid_cache(self, date_str: str, cache_type: str) -> bool:
-        """Check if cache exists"""
+        """Check if cache exists and is valid version"""
+        key = f"{date_str}_{cache_type}"
+        if key not in self._meta.get("entries", {}):
+            return False
+
+        entry = self._meta["entries"][key]
+        if entry.get("version") != CACHE_VERSION:
+            return False
+
         path = self._get_cache_path(date_str, cache_type)
         return path.exists()
 
@@ -120,24 +201,24 @@ class CacheManager:
 
         return status
 
-    # ========== Stub Methods (No-op in Cloud) ==========
+    def clear_cache(self, date_str: Optional[str] = None) -> None:
+        """Clear cache for specific date or all"""
+        if date_str:
+            # Clear specific date
+            for cache_type in ["trips", "passengers", "floor_stats", "sward", "tward"]:
+                path = self._get_cache_path(date_str, cache_type)
+                if path.exists():
+                    path.unlink()
+                    logger.info(f"Cleared cache: {path}")
 
-    def save_trips(self, *args, **kwargs):
-        """Stub: Save disabled in cloud mode"""
-        pass
+                key = f"{date_str}_{cache_type}"
+                if key in self._meta.get("entries", {}):
+                    del self._meta["entries"][key]
+        else:
+            # Clear all
+            for path in self.cache_dir.glob("*.parquet"):
+                path.unlink()
+                logger.info(f"Cleared cache: {path}")
+            self._meta["entries"] = {}
 
-    def save_passengers(self, *args, **kwargs):
-        """Stub: Save disabled in cloud mode"""
-        pass
-
-    def save_sward(self, *args, **kwargs):
-        """Stub: Save disabled in cloud mode"""
-        pass
-
-    def save_tward(self, *args, **kwargs):
-        """Stub: Save disabled in cloud mode"""
-        pass
-
-    def clear_cache(self, *args, **kwargs):
-        """Stub: Clear disabled in cloud mode"""
-        pass
+        self._save_meta()

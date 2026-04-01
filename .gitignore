@@ -1,9 +1,19 @@
+# Environment
+.env
+*.env
+
+# Streamlit secrets (NEVER commit)
+.streamlit/secrets.toml
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 .Python
+*.so
+.eggs/
+*.egg-info/
+*.egg
 .venv/
 venv/
 ENV/
@@ -14,29 +24,39 @@ ENV/
 *.swp
 *.swo
 
-# OS
+# macOS
 .DS_Store
 Thumbs.db
 
-# Environment
-.env
-.env.local
-*.env
+# Logs
+*.log
+logs/
 
-# Secrets (NEVER commit)
+# Credentials
+*_key.json
 *secret*.json
 *credential*.json
+credentials/
 token.json
 service_account*.json
 
-# Raw Data (should not be in release)
+# Raw data (should not be in Release)
+data/raw/
 Y1_Hoist_Data_*/
-*.csv
 
-# Logs
-logs/
-*.log
-
-# Local cache (data/cache/*.parquet should be committed for cloud)
-# But we want to ignore local development cache updates
+# Backup and intermediate files
+*_v3_backup.*
+*_v4.*
 .cache_backup/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Agent artifacts
+.artifacts/
+
+# Project memory (dev only)
+PROJECT_MEMORY.md
+CLAUDE.md

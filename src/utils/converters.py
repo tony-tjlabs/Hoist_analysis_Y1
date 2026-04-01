@@ -73,3 +73,20 @@ def minutes_to_time(minutes: int) -> str:
     hours = minutes // 60
     mins = minutes % 60
     return f"{hours:02d}:{mins:02d}"
+
+
+def format_hoist_name(hoist_name: str) -> str:
+    """Convert raw hoist name to readable display name.
+
+    Examples:
+        CUB_Hoist_1  -> CUB Hoist1
+        FAB_Hoist_4  -> FAB Hoist4
+        FAB_Climber_1 -> FAB Climber1
+        WWT_Hoist_2  -> WWT Hoist2
+    """
+    parts = hoist_name.split("_")
+    if len(parts) >= 3:
+        return f"{parts[0]} {parts[1]}{parts[2]}"
+    elif len(parts) >= 2:
+        return f"{parts[0]} {parts[1]}"
+    return hoist_name

@@ -219,7 +219,7 @@ def render_floor_tab(
     render_info_tooltip(
         "층별 유입·유출 분석",
         "1층 이상의 모든 층은 **호이스트를 통해서만 이동**할 수 있으므로,\n"
-        "호이스트 탑승 데이터로 각 층의 유입/유출 인원을 추정합니다.\n\n"
+        "v4.5 Rate-Matching 기반 탑승 데이터로 각 층의 유입/유출 인원을 추정합니다.\n\n"
         "- **유입**: 해당 층에 **도착**한 탑승 건수 (end_floor 기준)\n"
         "- **유출**: 해당 층에서 **출발**한 탑승 건수 (start_floor 기준)\n"
         "- **순유입**: 유입 - 유출 (양수 = 인원 증가, 음수 = 인원 감소)\n\n"
@@ -294,7 +294,7 @@ def render_floor_tab(
 
             # Table
             st.dataframe(
-                floor_occ_df.style.applymap(
+                floor_occ_df.style.map(
                     lambda v: "color: #22C55E" if v == "증가"
                     else ("color: #EF4444" if v == "감소" else "color: #888"),
                     subset=["상태"]

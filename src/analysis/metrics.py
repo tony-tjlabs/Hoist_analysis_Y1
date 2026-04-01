@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 
 from ..data.schema import HoistMetrics, FloorMetrics
+from ..utils.converters import format_hoist_name
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +45,36 @@ def calculate_hoist_metrics(
     building = hoist_trips["building_name"].iloc[0]
     trip_count = len(hoist_trips)
 
-    # Operating time
-    operating_sec = hoist_trips["duration_sec"].sum()
+    # Operating time: merge overlapping trips + short gaps (≤10min = standby)
+    STANDBY_GAP_SEC = 600  # 10분 이하 갭은 가동(탑승 대기 등)
+    DAY_SEC = 86400        # 24시간 기준
+
+    sorted_trips = hoist_trips.sort_values("start_time")
+    intervals = list(zip(sorted_trips["start_time"], sorted_trips["end_time"]))
+
+    # Merge intervals: trip + gap ≤ 10min → single operating block
+    merged = []
+    for start, end in intervals:
+        if merged and (start - merged[-1][1]).total_seconds() <= STANDBY_GAP_SEC:
+            # Gap ≤ 10min: extend current block (standby = 가동)
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    operating_sec = sum((e - s).total_seconds() for s, e in merged)
     operating_min = operating_sec / 60.0
 
-    # Calculate total span time
-    start = hoist_trips["start_time"].min()
-    end = hoist_trips["end_time"].max()
-    total_span_sec = (end - start).total_seconds()
+    # Idle = 24h - operating
+    idle_sec = max(0, DAY_SEC - operating_sec)
+    idle_min = idle_sec / 60.0
 
-    # Idle time (span - operating)
-    idle_sec = total_span_sec - operating_sec
-    idle_min = max(0, idle_sec / 60.0)
+    # Utilization = operating / 24h
+    utilization = min(operating_sec / DAY_SEC, 1.0)
 
-    # Utilization rate
-    utilization = operating_sec / total_span_sec if total_span_sec > 0 else 0.0
-
-    # Passenger stats
+    # Passenger stats (exclude empty runs)
     total_passengers = len(hoist_passengers)
-    avg_passengers = total_passengers / trip_count if trip_count > 0 else 0.0
+    trips_with_pax = hoist_passengers["trip_id"].nunique() if len(hoist_passengers) > 0 else 0
+    avg_passengers = total_passengers / trips_with_pax if trips_with_pax > 0 else 0.0
 
     return HoistMetrics(
         hoist_name=hoist_name,
@@ -250,10 +262,22 @@ def calculate_building_summary(
             passengers_df["hoist_name"].isin(building_trips["hoist_name"].unique())
         ]
 
+        # Operating time with standby merge per hoist
+        bld_operating_sec = 0
+        for _, hg in building_trips.groupby("hoist_name"):
+            st_ = hg.sort_values("start_time")
+            merged_b = []
+            for s, e in zip(st_["start_time"], st_["end_time"]):
+                if merged_b and (s - merged_b[-1][1]).total_seconds() <= 600:
+                    merged_b[-1] = (merged_b[-1][0], max(merged_b[-1][1], e))
+                else:
+                    merged_b.append((s, e))
+            bld_operating_sec += sum((e - s).total_seconds() for s, e in merged_b)
+
         summary[building] = {
             "hoist_count": building_trips["hoist_name"].nunique(),
             "trip_count": len(building_trips),
-            "total_operating_min": building_trips["duration_sec"].sum() / 60.0,
+            "total_operating_min": bld_operating_sec / 60.0,
             "passenger_count": len(building_pax),
             "avg_trip_duration_sec": building_trips["duration_sec"].mean()
         }
@@ -275,6 +299,12 @@ def calculate_overview_kpis(
     total_trips = len(trips_df)
     total_hoists = len(hoist_info)
 
+    # Trips with at least 1 passenger (exclude empty runs)
+    if len(passengers_df) > 0 and len(trips_df) > 0:
+        trips_with_pax = passengers_df["trip_id"].nunique()
+    else:
+        trips_with_pax = 0
+
     # Active hoists (with at least 1 trip)
     active_hoists = trips_df["hoist_name"].nunique() if len(trips_df) > 0 else 0
 
@@ -284,8 +314,20 @@ def calculate_overview_kpis(
     # Average trip duration
     avg_duration_sec = trips_df["duration_sec"].mean() if len(trips_df) > 0 else 0
 
-    # Total operating time
-    total_operating_min = trips_df["duration_sec"].sum() / 60.0 if len(trips_df) > 0 else 0
+    # Total operating time (merge overlapping + standby ≤10min per hoist)
+    STANDBY_GAP_SEC = 600
+    total_operating_sec = 0
+    if len(trips_df) > 0:
+        for _, hoist_grp in trips_df.groupby("hoist_name"):
+            sorted_t = hoist_grp.sort_values("start_time")
+            merged = []
+            for s, e in zip(sorted_t["start_time"], sorted_t["end_time"]):
+                if merged and (s - merged[-1][1]).total_seconds() <= STANDBY_GAP_SEC:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            total_operating_sec += sum((e - s).total_seconds() for s, e in merged)
+    total_operating_min = total_operating_sec / 60.0
 
     # Peak hour
     if len(trips_df) > 0:
@@ -330,6 +372,7 @@ def calculate_overview_kpis(
 
     return {
         "total_trips": total_trips,
+        "trips_with_passengers": trips_with_pax,
         "total_hoists": total_hoists,
         "active_hoists": active_hoists,
         "total_passengers": total_passengers,
@@ -658,9 +701,14 @@ def calculate_wait_time_metrics(
         if wait_sec < 0:
             wait_sec = 0
 
+        # 10분 bin: "07:00", "07:10", ...
+        minute_bin = (trip_start.minute // 10) * 10
+        time_bin = f"{trip_start.hour:02d}:{minute_bin:02d}"
+
         wait_records.append({
             "hoist_name": hoist_name,
             "hour": trip_start.hour,
+            "time_bin": time_bin,
             "wait_sec": wait_sec,
             "mac_address": mac,
             "trip_id": pax["trip_id"],
@@ -671,7 +719,16 @@ def calculate_wait_time_metrics(
 
     wait_df = pd.DataFrame(wait_records)
 
-    # Hourly aggregation
+    # 10-minute bin aggregation (primary)
+    bin_wait = {}
+    for tbin, grp in wait_df.groupby("time_bin"):
+        bin_wait[tbin] = {
+            "avg_wait": float(grp["wait_sec"].mean()),
+            "max_wait": float(grp["wait_sec"].max()),
+            "count": len(grp),
+        }
+
+    # Hourly aggregation (backward compat + LLM summary)
     hourly_wait = {}
     for hour, grp in wait_df.groupby("hour"):
         hourly_wait[int(hour)] = {
@@ -703,6 +760,7 @@ def calculate_wait_time_metrics(
 
     return {
         "hourly_wait": hourly_wait,
+        "bin_wait": bin_wait,  # 10분 단위 (primary)
         "hoist_wait": hoist_wait,
         "summary": summary,
         "insights": insights,
@@ -825,11 +883,18 @@ def generate_management_insights(
         if len(hoist_trips) == 0:
             continue
 
-        operating_sec = hoist_trips["duration_sec"].sum()
-        start_time = hoist_trips["start_time"].min()
-        end_time = hoist_trips["end_time"].max()
-        span_sec = (end_time - start_time).total_seconds()
-        utilization = (operating_sec / span_sec * 100) if span_sec > 0 else 0
+        # Utilization: merged intervals (gap ≤ 10min = standby) / 24h
+        STANDBY_GAP_SEC = 600
+        DAY_SEC = 86400
+        sorted_hoist = hoist_trips.sort_values("start_time")
+        merged = []
+        for s, e in zip(sorted_hoist["start_time"], sorted_hoist["end_time"]):
+            if merged and (s - merged[-1][1]).total_seconds() <= STANDBY_GAP_SEC:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        operating_sec = sum((e - s).total_seconds() for s, e in merged)
+        utilization = min(operating_sec / DAY_SEC * 100, 100.0)
 
         hoist_metrics.append({
             "hoist": hoist,
@@ -846,7 +911,7 @@ def generate_management_insights(
             insights.append({
                 "type": "efficiency",
                 "severity": 2,
-                "title": f"{min_util['hoist'].split('_')[-1]} 가동률 저조",
+                "title": f"{min_util['hoist'].replace('_', ' ')} 가동률 저조",
                 "detail": (
                     f"{min_util['hoist']}의 가동률이 {min_util['utilization']:.1f}%로 "
                     f"전체 호이스트 중 가장 낮습니다. (운행 {min_util['trip_count']}회)"
@@ -860,7 +925,7 @@ def generate_management_insights(
             insights.append({
                 "type": "utilization",
                 "severity": 2 if max_util["utilization"] < 50 else 3,
-                "title": f"{max_util['hoist'].split('_')[-1]} 과부하 위험",
+                "title": f"{max_util['hoist'].replace('_', ' ')} 과부하 위험",
                 "detail": (
                     f"{max_util['hoist']}의 가동률이 {max_util['utilization']:.1f}%로 "
                     f"가장 높습니다. 장비 피로 누적 가능성이 있습니다."
@@ -984,7 +1049,7 @@ def generate_management_insights(
                 insights.append({
                     "type": "wait_time",
                     "severity": 2,
-                    "title": f"{max_wait_hoist.split('_')[-1]} 대기시간 가장 김",
+                    "title": f"{max_wait_hoist.replace('_', ' ')} 대기시간 가장 김",
                     "detail": (
                         f"{max_wait_hoist} 평균 대기시간: {max_wait_val/60:.1f}분, "
                         f"최대 {hoist_wait[max_wait_hoist]['max_wait']/60:.1f}분"
@@ -1045,15 +1110,23 @@ def calculate_hoist_comparison_data(
         pax_list = hoist_trips["pax_count"].tolist()
         trip_count = len(hoist_trips)
         total_pax = sum(pax_list)
-        avg_pax = np.mean(pax_list) if pax_list else 0
+        # Avg passengers: exclude empty runs (trips with 0 passengers)
+        trips_with_pax = sum(1 for p in pax_list if p > 0)
+        avg_pax = total_pax / trips_with_pax if trips_with_pax > 0 else 0
         max_pax = max(pax_list) if pax_list else 0
 
-        # Utilization
-        operating_sec = hoist_trips["duration_sec"].sum()
-        start_time = hoist_trips["start_time"].min()
-        end_time = hoist_trips["end_time"].max()
-        span_sec = (end_time - start_time).total_seconds()
-        utilization = (operating_sec / span_sec * 100) if span_sec > 0 else 0
+        # Utilization: merged intervals (gap ≤ 10min = standby) / 24h
+        STANDBY_GAP_SEC = 600
+        DAY_SEC = 86400
+        sorted_trips = hoist_trips.sort_values("start_time")
+        merged = []
+        for s, e in zip(sorted_trips["start_time"], sorted_trips["end_time"]):
+            if merged and (s - merged[-1][1]).total_seconds() <= STANDBY_GAP_SEC:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        operating_sec = sum((e - s).total_seconds() for s, e in merged)
+        utilization = min(operating_sec / DAY_SEC * 100, 100.0)
 
         # Wait time
         wait_data = hoist_wait.get(hoist, {})
@@ -1061,7 +1134,7 @@ def calculate_hoist_comparison_data(
 
         records.append({
             "hoist_name": hoist,
-            "short_name": hoist.split("_")[-1] if "_" in hoist else hoist,
+            "short_name": format_hoist_name(hoist),
             "building_name": hoist_trips["building_name"].iloc[0],
             "trip_count": trip_count,
             "total_pax": total_pax,

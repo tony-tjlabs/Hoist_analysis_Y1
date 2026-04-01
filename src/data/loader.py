@@ -1,71 +1,256 @@
-"""Data loaders for Hoist Analysis (Cloud Release - Static data from cache meta)"""
+"""Data loaders for Hoist Analysis"""
 
-import json
-import logging
+import pandas as pd
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Generator
+import logging
 
-from .schema import HoistInfo
+from .schema import HoistInfo, FloorElevation
+from ..utils.config import SAMPLE_DATA_DIR, DEFAULT_DATE, get_data_dir
 
 logger = logging.getLogger(__name__)
 
-# Static data embedded for cloud deployment (extracted from 20260326 data)
-# This avoids the need to include CSV files
 
-_HOIST_INFO = {
-    "CUB_Hoist_1": HoistInfo(hoist_name="CUB_Hoist_1", building_name="CUB", fix_gateway_no=113, mov_gateway_no=112),
-    "CUB_Hoist_2": HoistInfo(hoist_name="CUB_Hoist_2", building_name="CUB", fix_gateway_no=115, mov_gateway_no=114),
-    "CUB_Hoist_3": HoistInfo(hoist_name="CUB_Hoist_3", building_name="CUB", fix_gateway_no=117, mov_gateway_no=116),
-    "FAB_Hoist_1": HoistInfo(hoist_name="FAB_Hoist_1", building_name="FAB", fix_gateway_no=103, mov_gateway_no=102),
-    "FAB_Hoist_2": HoistInfo(hoist_name="FAB_Hoist_2", building_name="FAB", fix_gateway_no=105, mov_gateway_no=104),
-    "FAB_Hoist_3": HoistInfo(hoist_name="FAB_Hoist_3", building_name="FAB", fix_gateway_no=107, mov_gateway_no=106),
-    "WWT_Hoist_1": HoistInfo(hoist_name="WWT_Hoist_1", building_name="WWT", fix_gateway_no=109, mov_gateway_no=108),
-    "WWT_Hoist_2": HoistInfo(hoist_name="WWT_Hoist_2", building_name="WWT", fix_gateway_no=111, mov_gateway_no=110),
-    "WWT_Hoist_3": HoistInfo(hoist_name="WWT_Hoist_3", building_name="WWT", fix_gateway_no=101, mov_gateway_no=100),
-}
-
-_FLOOR_ELEVATIONS = {
-    "CUB": {
-        "1F": 0.0, "2F": 5.5, "3F": 9.5, "4F": 13.8, "5F": 18.0,
-        "6F": 22.3, "7F": 26.5, "Roof": 30.8
-    },
-    "FAB": {
-        "B1": -6.0, "1F": 0.0, "2F": 5.8, "3F": 11.5, "4F": 17.3,
-        "5F": 23.0, "6F": 28.8, "7F": 34.5, "8F": 40.3, "9F": 46.0,
-        "10F": 51.8, "Roof": 57.5
-    },
-    "WWT": {
-        "B1": -5.0, "1F": 0.0, "2F": 4.5, "3F": 9.0, "Roof": 13.5
-    }
-}
-
-
-def load_hoist_info(date_str: Optional[str] = None, **kwargs) -> Dict[str, HoistInfo]:
+def load_sward_data(
+    date_str: Optional[str] = None,
+    file_path: Optional[Path] = None
+) -> pd.DataFrame:
     """
-    Load hoist-gateway mapping (static data)
+    Load S-Ward sensor data from CSV
 
     Args:
-        date_str: Ignored in cloud mode
+        date_str: Date string (YYYYMMDD). Uses default if None.
+        file_path: Path to CSV file. Uses date_str based path if None.
+
+    Returns:
+        DataFrame with parsed datetime and cleaned columns
+    """
+    if file_path is None:
+        date_str = date_str or DEFAULT_DATE
+        data_dir = get_data_dir(date_str)
+        file_path = data_dir / f"Y1_Hoist_SWardData_{date_str}.csv"
+
+    logger.info(f"Loading S-Ward data from {file_path}")
+
+    df = pd.read_csv(file_path)
+
+    # Parse datetime (format: "2026-03-26 00:00:00.143 +0900")
+    df["insert_datetime"] = pd.to_datetime(
+        df["insert_datetime"].str.replace(r" [+-]\d{4}$", "", regex=True)
+    )
+
+    # Rename columns for consistency
+    df = df.rename(columns={
+        "is_movied": "is_moving",
+        "batt_value": "battery"
+    })
+
+    # Sort by datetime
+    df = df.sort_values("insert_datetime").reset_index(drop=True)
+
+    logger.info(f"Loaded {len(df):,} S-Ward records")
+    return df
+
+
+def load_device_data(
+    date_str: Optional[str] = None,
+    file_path: Optional[Path] = None,
+    chunk_size: int = 500000,
+    tward_only: bool = False
+) -> pd.DataFrame:
+    """
+    Load device detection data from CSV (CP949 encoding)
+
+    Args:
+        date_str: Date string (YYYYMMDD). Uses default if None.
+        file_path: Path to CSV file. Uses date_str based path if None.
+        chunk_size: Rows to process per chunk (memory optimization)
+        tward_only: If True, only load T-Ward records (type=41)
+
+    Returns:
+        DataFrame with device records
+    """
+    if file_path is None:
+        date_str = date_str or DEFAULT_DATE
+        data_dir = get_data_dir(date_str)
+        file_path = data_dir / f"Y1_Hoist_DeviceData_{date_str}.csv"
+
+    logger.info(f"Loading device data from {file_path}")
+
+    # Define columns to load (skip unnecessary ones for memory)
+    usecols = [
+        "insert_datetime", "gateway_no", "user_no", "user_name",
+        "company_name", "mac_address", "rssi", "type", "pressure"
+    ]
+
+    # Read in chunks for memory efficiency
+    chunks = []
+    total_rows = 0
+
+    for chunk in pd.read_csv(
+        file_path,
+        encoding="cp949",
+        usecols=usecols,
+        chunksize=chunk_size,
+        low_memory=False
+    ):
+        # Filter T-Ward only if requested
+        if tward_only:
+            chunk = chunk[chunk["type"] == 41]
+
+        # Parse datetime
+        chunk["insert_datetime"] = pd.to_datetime(
+            chunk["insert_datetime"].str.replace(r" [+-]\d{4}$", "", regex=True)
+        )
+
+        chunks.append(chunk)
+        total_rows += len(chunk)
+
+        if total_rows % 1000000 == 0:
+            logger.info(f"Processed {total_rows:,} rows...")
+
+    df = pd.concat(chunks, ignore_index=True)
+
+    # Rename type column
+    df = df.rename(columns={"type": "device_type"})
+
+    # Convert pressure to numeric (may have empty values)
+    df["pressure"] = pd.to_numeric(df["pressure"], errors="coerce")
+
+    # Sort by datetime
+    df = df.sort_values("insert_datetime").reset_index(drop=True)
+
+    logger.info(f"Loaded {len(df):,} device records")
+    return df
+
+
+def load_device_data_chunked(
+    date_str: Optional[str] = None,
+    file_path: Optional[Path] = None,
+    chunk_size: int = 500000
+) -> Generator[pd.DataFrame, None, None]:
+    """
+    Generator to load device data in chunks (for memory-constrained environments)
+
+    Args:
+        date_str: Date string (YYYYMMDD). Uses default if None.
+
+    Yields:
+        DataFrame chunks
+    """
+    if file_path is None:
+        date_str = date_str or DEFAULT_DATE
+        data_dir = get_data_dir(date_str)
+        file_path = data_dir / f"Y1_Hoist_DeviceData_{date_str}.csv"
+
+    usecols = [
+        "insert_datetime", "gateway_no", "user_no", "user_name",
+        "company_name", "mac_address", "rssi", "type", "pressure"
+    ]
+
+    for chunk in pd.read_csv(
+        file_path,
+        encoding="cp949",
+        usecols=usecols,
+        chunksize=chunk_size,
+        low_memory=False
+    ):
+        chunk["insert_datetime"] = pd.to_datetime(
+            chunk["insert_datetime"].str.replace(r" [+-]\d{4}$", "", regex=True)
+        )
+        chunk = chunk.rename(columns={"type": "device_type"})
+        chunk["pressure"] = pd.to_numeric(chunk["pressure"], errors="coerce")
+        yield chunk
+
+
+def load_hoist_info(
+    date_str: Optional[str] = None,
+    file_path: Optional[Path] = None
+) -> Dict[str, HoistInfo]:
+    """
+    Load hoist-gateway mapping
+
+    Args:
+        date_str: Date string (YYYYMMDD). Uses default if None.
 
     Returns:
         Dict keyed by hoist_name
     """
-    logger.info(f"Loaded {len(_HOIST_INFO)} hoist configurations (embedded)")
-    return _HOIST_INFO.copy()
+    if file_path is None:
+        date_str = date_str or DEFAULT_DATE
+        data_dir = get_data_dir(date_str)
+        file_path = data_dir / f"Y1_Hoist_SWardInfo_{date_str}.csv"
+        # Fallback: 현장 구조 설정은 data/config/ 에서 검색
+        if not file_path.exists():
+            from ..utils.config import CONFIG_DIR
+            candidates = sorted(CONFIG_DIR.glob("Y1_Hoist_SWardInfo_*.csv"))
+            if candidates:
+                file_path = candidates[-1]
+
+    logger.info(f"Loading hoist info from {file_path}")
+
+    df = pd.read_csv(file_path)
+
+    hoists = {}
+    for _, row in df.iterrows():
+        hoist = HoistInfo(
+            hoist_name=row["hoist_name"],
+            building_name=row["building_name"],
+            fix_gateway_no=int(row["fix_gateway_no"]),
+            mov_gateway_no=int(row["mov_gateway_no"])
+        )
+        hoists[hoist.hoist_name] = hoist
+
+    logger.info(f"Loaded {len(hoists)} hoist configurations")
+    return hoists
 
 
-def load_floor_elevation(date_str: Optional[str] = None, **kwargs) -> Dict[str, Dict[str, float]]:
+def load_floor_elevation(
+    date_str: Optional[str] = None,
+    file_path: Optional[Path] = None
+) -> Dict[str, Dict[str, float]]:
     """
-    Load floor elevations (static data)
+    Load floor elevations
 
     Args:
-        date_str: Ignored in cloud mode
+        date_str: Date string (YYYYMMDD). Uses default if None.
 
     Returns:
         Nested dict: building -> floor -> elevation (meters)
     """
-    logger.info(f"Loaded elevations for {len(_FLOOR_ELEVATIONS)} buildings (embedded)")
-    return {k: dict(v) for k, v in _FLOOR_ELEVATIONS.items()}
+    if file_path is None:
+        date_str = date_str or DEFAULT_DATE
+        data_dir = get_data_dir(date_str)
+        file_path = data_dir / f"Y1_Building_FloorElevation_{date_str}.csv"
+        # Fallback: 건물 구조는 data/config/ 에서 검색
+        if not file_path.exists():
+            from ..utils.config import CONFIG_DIR
+            candidates = sorted(CONFIG_DIR.glob("Y1_Building_FloorElevation_*.csv"))
+            if candidates:
+                file_path = candidates[-1]
+
+    logger.info(f"Loading floor elevations from {file_path}")
+
+    df = pd.read_csv(file_path)
+
+    elevations = {}
+    for _, row in df.iterrows():
+        building = row["building_name"]
+        floor = row["floor_name"]
+        elevation = float(row["elevation"])
+
+        if building not in elevations:
+            elevations[building] = {}
+        elevations[building][floor] = elevation
+
+    # Sort floors by elevation
+    for building in elevations:
+        elevations[building] = dict(
+            sorted(elevations[building].items(), key=lambda x: x[1])
+        )
+
+    logger.info(f"Loaded elevations for {len(elevations)} buildings")
+    return elevations
 
 
 def get_gateway_to_hoist_map(hoist_info: Dict[str, HoistInfo]) -> Dict[int, str]:

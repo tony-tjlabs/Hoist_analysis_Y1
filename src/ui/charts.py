@@ -13,6 +13,7 @@ from .styles import (
     PLOTLY_DARK_LAYOUT, apply_dark_layout,
     get_passenger_color, get_evidence_color, get_classification_color
 )
+from ..utils.converters import format_hoist_name
 
 
 def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
@@ -142,7 +143,7 @@ def create_trip_gantt_with_passengers(
                 pax = row["pax_count"]
 
                 # Short hoist name for display
-                short_name = hoist.split("_")[-1]
+                short_name = format_hoist_name(hoist)
 
                 # Hover text
                 duration_min = row["duration_sec"] / 60
@@ -304,7 +305,7 @@ def create_hourly_chart(
         showlegend=False
     )
 
-    fig.update_xaxes(tickmode="linear", dtick=1)
+    fig.update_xaxes(tickmode="linear", dtick=1, range=[-0.5, 23.5])
 
     return apply_dark_layout(fig)
 
@@ -377,7 +378,7 @@ def create_hourly_passenger_line(
         showlegend=False
     )
 
-    fig.update_xaxes(tickmode="linear", dtick=1)
+    fig.update_xaxes(tickmode="linear", dtick=1, range=[-0.5, 23.5])
 
     return apply_dark_layout(fig)
 
@@ -416,6 +417,7 @@ def create_passenger_hourly_chart(
         xaxis_title="시간",
         yaxis_title="탑승 인원",
         height=350,
+        xaxis=dict(tickmode="linear", dtick=1, range=[-0.5, 23.5]),
     )
 
     return apply_dark_layout(fig)
@@ -770,7 +772,7 @@ def create_elevator_shaft_timeline(
                 y=floors,
                 mode="lines",
                 line=dict(color=base_color, width=2),
-                name=hoist.split("_")[-1],
+                name=format_hoist_name(hoist),
                 hoverinfo="skip",
                 connectgaps=False
             )
@@ -833,12 +835,15 @@ def create_evidence_radar_chart(
     composite_score: float
 ) -> go.Figure:
     """
-    Create radar chart for multi-evidence scores (Dark Theme)
+    Create radar chart for v4.5 Rate-Matching scores (Dark Theme).
+
+    Note: In v4.5, spatial_score and timing_score are always 0.0 (legacy compat).
+    pressure_score maps to rate_match_score. RSSI is for candidate selection only.
 
     Args:
-        rssi_score: RSSI evidence score (0-1)
-        pressure_score: Pressure correlation score (0-1)
-        spatial_score: Spatial evidence score (0-1)
+        rssi_score: Legacy RSSI score (0-1) — kept for backward compatibility
+        pressure_score: Rate-match score (= rate_match_score in v4.5)
+        spatial_score: Always 0.0 in v4.5 (not used)
         timing_score: Timing evidence score (0-1)
         composite_score: Weighted composite score (0-1)
 
@@ -886,7 +891,7 @@ def create_evidence_radar_chart(
             ),
             bgcolor="#1E2330"
         ),
-        title=f"Multi-Evidence 분석 (종합: {composite_score*100:.0f}% - {classification})",
+        title=f"v4.5 Rate-Matching 분석 (종합: {composite_score*100:.0f}% - {classification})",
         height=350,
         showlegend=False,
         paper_bgcolor="#0E1117",
@@ -900,10 +905,13 @@ def create_evidence_distribution_chart(
     passengers_df: pd.DataFrame
 ) -> go.Figure:
     """
-    Create stacked bar chart showing evidence score distribution (Dark Theme)
+    Create stacked bar chart showing evidence score distribution (Dark Theme).
+
+    In v4.5, rate_match_score replaces pressure_score as the primary metric.
+    spatial_score and timing_score are always 0.0 (legacy compatibility).
 
     Args:
-        passengers_df: DataFrame with multi-evidence columns
+        passengers_df: DataFrame with v4.5 rate-matching or legacy columns
 
     Returns:
         Plotly figure
@@ -912,14 +920,14 @@ def create_evidence_distribution_chart(
         fig = go.Figure()
         return apply_dark_layout(fig)
 
-    # Check for multi-evidence columns
+    # Check for evidence columns (v4.5 uses rate_match_score; legacy uses rssi/pressure/spatial/timing)
     evidence_cols = ["rssi_score", "pressure_score", "spatial_score", "timing_score"]
     available_cols = [c for c in evidence_cols if c in passengers_df.columns]
 
     if not available_cols:
         fig = go.Figure()
         fig.add_annotation(
-            text="Multi-Evidence 데이터 없음",
+            text="Rate-Matching 데이터 없음",
             xref="paper", yref="paper",
             x=0.5, y=0.5,
             showarrow=False,
@@ -1003,7 +1011,7 @@ def create_composite_score_histogram(
                   annotation_text="추정 (0.4)", annotation_position="top")
 
     fig.update_layout(
-        title="종합 점수 분포 (Multi-Evidence)",
+        title="종합 점수 분포 (v4.5 Rate-Matching)",
         xaxis_title="종합 점수",
         yaxis_title="빈도",
         height=300
@@ -1090,8 +1098,8 @@ def create_congestion_heatmap(
     if hoist_names is None:
         hoist_names = sorted(hoist_hourly_ci.keys())
 
-    # Time bins from 06:00 to 22:50 (10-min intervals)
-    time_bins = list(range(6 * 60, 23 * 60, interval_min))
+    # Time bins from 00:00 to 23:50 (10-min intervals, 24시간 현장)
+    time_bins = list(range(0, 24 * 60, interval_min))
     x_labels = [f"{m // 60:02d}:{m % 60:02d}" for m in time_bins]
 
     z_data = []
@@ -1107,7 +1115,9 @@ def create_congestion_heatmap(
             max_pax = data.get("max_pax", 0)
             row.append(max_pax)  # Use max passengers instead of CI
             end_min = tbin + interval_min
-            avg_pax = data["passengers"] / data["trips"] if data["trips"] > 0 else 0
+            # Exclude empty runs for avg (trips_with_pax)
+            trips_with_pax = data.get("trips_with_pax", data["trips"])
+            avg_pax = data["passengers"] / trips_with_pax if trips_with_pax > 0 else 0
             hover_row.append(
                 f"<b>{hoist}</b><br>"
                 f"시간: {tbin//60:02d}:{tbin%60:02d}~{end_min//60:02d}:{end_min%60:02d}<br>"
@@ -1230,17 +1240,22 @@ def create_peak_comparison_chart(peak_analysis: Dict[str, Dict]) -> go.Figure:
 # Wait Time Charts (v4.0)
 # ============================================================
 
-def create_wait_time_line_chart(hourly_wait: Dict[int, Dict]) -> go.Figure:
+def create_wait_time_line_chart(
+    wait_data: Dict, bin_mode: bool = False
+) -> go.Figure:
     """
-    Create hourly wait time line chart (Dark Theme)
+    Create wait time line chart (Dark Theme).
 
     Args:
-        hourly_wait: {hour: {avg_wait, max_wait, count}}
+        wait_data: {key: {avg_wait, max_wait, count}}
+            - bin_mode=False: key = hour (int), e.g. {7: {...}, 8: {...}}
+            - bin_mode=True:  key = "HH:MM" (str), e.g. {"07:00": {...}, "07:10": {...}}
+        bin_mode: If True, treat keys as 10-minute time bins
 
     Returns:
         Plotly figure
     """
-    if not hourly_wait:
+    if not wait_data:
         fig = go.Figure()
         fig.add_annotation(
             text="대기시간 데이터 없음",
@@ -1251,49 +1266,66 @@ def create_wait_time_line_chart(hourly_wait: Dict[int, Dict]) -> go.Figure:
         )
         return apply_dark_layout(fig)
 
-    hours = sorted(hourly_wait.keys())
-    avg_waits = [hourly_wait[h]["avg_wait"] for h in hours]
-    max_waits = [hourly_wait[h]["max_wait"] for h in hours]
+    if bin_mode:
+        # 10-minute bins: keys are "HH:MM" strings
+        bins = sorted(wait_data.keys())
+        x_labels = bins
+        avg_waits = [wait_data[b]["avg_wait"] for b in bins]
+        max_waits = [wait_data[b]["max_wait"] for b in bins]
+        counts = [wait_data[b]["count"] for b in bins]
+        title = "시간대별 평균 대기시간 (10분 단위)"
+    else:
+        # Hourly: keys are ints
+        hours = sorted(wait_data.keys())
+        x_labels = [f"{h:02d}:00" for h in hours]
+        avg_waits = [wait_data[h]["avg_wait"] for h in hours]
+        max_waits = [wait_data[h]["max_wait"] for h in hours]
+        counts = [wait_data[h]["count"] for h in hours]
+        title = "시간대별 평균 대기시간 (1시간 단위)"
 
     fig = go.Figure()
 
     # Average wait time (area)
     fig.add_trace(go.Scatter(
-        x=[f"{h:02d}:00" for h in hours],
+        x=x_labels,
         y=avg_waits,
         mode="lines",
         fill="tozeroy",
         line=dict(color="#3B82F6", width=2),
         fillcolor="rgba(59, 130, 246, 0.2)",
-        name="평균 대기시간"
+        name="평균 대기시간",
+        customdata=counts,
+        hovertemplate="%{x}<br>평균: %{y:.0f}초<br>탑승건수: %{customdata}건<extra></extra>",
     ))
 
-    # Max wait time (markers)
-    fig.add_trace(go.Scatter(
-        x=[f"{h:02d}:00" for h in hours],
-        y=max_waits,
-        mode="markers",
-        marker=dict(size=8, color="#EF4444", symbol="diamond"),
-        name="최대 대기시간"
-    ))
+    # Max wait time (markers) — only if not too many points
+    if len(x_labels) <= 30:
+        fig.add_trace(go.Scatter(
+            x=x_labels,
+            y=max_waits,
+            mode="markers",
+            marker=dict(size=6, color="#EF4444", symbol="diamond"),
+            name="최대 대기시간",
+            hovertemplate="%{x}<br>최대: %{y:.0f}초<extra></extra>",
+        ))
 
-    # Peak time highlights
-    all_hours_str = [f"{h:02d}:00" for h in range(6, 23)]
-    if "06:00" in [f"{h:02d}:00" for h in hours] or "07:00" in [f"{h:02d}:00" for h in hours]:
-        fig.add_vrect(x0="06:00", x1="08:00", fillcolor="rgba(245,158,11,0.1)",
-                      line_width=0, annotation_text="출근", annotation_position="top left")
-    if "12:00" in [f"{h:02d}:00" for h in hours]:
-        fig.add_vrect(x0="12:00", x1="13:00", fillcolor="rgba(245,158,11,0.1)",
-                      line_width=0, annotation_text="점심", annotation_position="top left")
-    if "17:00" in [f"{h:02d}:00" for h in hours] or "18:00" in [f"{h:02d}:00" for h in hours]:
-        fig.add_vrect(x0="17:00", x1="19:00", fillcolor="rgba(245,158,11,0.1)",
-                      line_width=0, annotation_text="퇴근", annotation_position="top left")
+    # Peak time highlights (24시간 현장 — 주요 교대 시간)
+    fig.add_vrect(x0="06:00", x1="08:00", fillcolor="rgba(245,158,11,0.08)",
+                  line_width=0, annotation_text="주간 교대", annotation_position="top left")
+    fig.add_vrect(x0="12:00", x1="13:00", fillcolor="rgba(245,158,11,0.08)",
+                  line_width=0, annotation_text="점심", annotation_position="top left")
+    fig.add_vrect(x0="18:00", x1="20:00", fillcolor="rgba(245,158,11,0.08)",
+                  line_width=0, annotation_text="야간 교대", annotation_position="top left")
 
     fig.update_layout(
-        title="시간대별 대기시간",
+        title=title,
         xaxis_title="시간",
         yaxis_title="대기시간 (초)",
-        height=350
+        height=350,
+        xaxis=dict(
+            tickangle=-45 if bin_mode else 0,
+            dtick=6 if bin_mode else None,  # 10분 모드: 매 1시간(6개 bin)마다 레이블
+        ),
     )
 
     return apply_dark_layout(fig)
@@ -1321,7 +1353,8 @@ def create_wait_time_comparison_chart(hoist_wait: Dict[str, Dict]) -> go.Figure:
         return apply_dark_layout(fig)
 
     hoists = sorted(hoist_wait.keys())
-    short_names = [h.split("_")[-1] if "_" in h else h for h in hoists]
+
+    short_names = [format_hoist_name(h) for h in hoists]
 
     fig = go.Figure()
 
@@ -1397,9 +1430,13 @@ def create_congestion_bar_chart(
 
     stats = merged.groupby("time_bin").agg(
         max_pax=("pax_count", "max"),
-        avg_pax=("pax_count", "mean"),
+        total_pax=("pax_count", "sum"),
         trip_count=("trip_id", "count"),
     ).reset_index()
+    # Avg: exclude empty runs (pax_count > 0)
+    trips_with_pax = merged[merged["pax_count"] > 0].groupby("time_bin")["trip_id"].count()
+    stats["trips_with_pax"] = stats["time_bin"].map(trips_with_pax).fillna(0)
+    stats["avg_pax"] = (stats["total_pax"] / stats["trips_with_pax"]).fillna(0)
 
     stats["time_label"] = stats["time_bin"].apply(
         lambda m: f"{m // 60:02d}:{m % 60:02d}"
@@ -1793,21 +1830,29 @@ def create_hoist_comparison_chart(
 
         trip_count = len(hoist_trips)
         total_pax = sum(hoist_pax_counts)
-        avg_pax = np.mean(hoist_pax_counts) if hoist_pax_counts else 0
+        # Avg passengers: exclude empty runs (trips with 0 passengers)
+        pax_with_passengers = [p for p in hoist_pax_counts if p > 0]
+        avg_pax = np.mean(pax_with_passengers) if pax_with_passengers else 0
         max_pax = max(hoist_pax_counts) if hoist_pax_counts else 0
 
-        # Calculate utilization
+        # Utilization: merged intervals (gap ≤ 10min = standby) / 24h
         if trip_count > 0:
-            operating_sec = hoist_trips["duration_sec"].sum()
-            start_time = hoist_trips["start_time"].min()
-            end_time = hoist_trips["end_time"].max()
-            span_sec = (end_time - start_time).total_seconds()
-            utilization = (operating_sec / span_sec * 100) if span_sec > 0 else 0
+            STANDBY_GAP_SEC = 600
+            DAY_SEC = 86400
+            sorted_trips = hoist_trips.sort_values("start_time")
+            merged = []
+            for s, e in zip(sorted_trips["start_time"], sorted_trips["end_time"]):
+                if merged and (s - merged[-1][1]).total_seconds() <= STANDBY_GAP_SEC:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            operating_sec = sum((e - s).total_seconds() for s, e in merged)
+            utilization = min(operating_sec / DAY_SEC * 100, 100.0)
         else:
             utilization = 0
 
         building = hoist_trips["building_name"].iloc[0] if len(hoist_trips) > 0 else ""
-        short_name = hoist.split("_")[-1] if "_" in hoist else hoist
+        short_name = format_hoist_name(hoist) if "_" in hoist else hoist
 
         data.append({
             "hoist": hoist,
@@ -1974,9 +2019,11 @@ def create_peak_period_comparison_chart(
             ]
 
             if len(period_trips) > 0:
-                avg_pax = period_trips["pax_count"].mean()
                 total_trips = len(period_trips)
                 total_pax = period_trips["pax_count"].sum()
+                # Exclude empty runs for avg
+                trips_w_pax = len(period_trips[period_trips["pax_count"] > 0])
+                avg_pax = total_pax / trips_w_pax if trips_w_pax > 0 else 0
             else:
                 avg_pax = 0
                 total_trips = 0
@@ -2031,3 +2078,692 @@ def create_peak_period_comparison_chart(
     )
 
     return apply_dark_layout(fig)
+
+
+# ============================================================
+# Multiday Charts
+# ============================================================
+
+
+def create_daily_trend_chart(
+    daily_summary: "pd.DataFrame"
+) -> go.Figure:
+    """
+    Create daily trend chart with trips (bar) and passengers (line)
+
+    Args:
+        daily_summary: DataFrame with date_str, trip_count, passenger_count, weekday
+
+    Returns:
+        Dual-axis bar + line chart
+    """
+    if len(daily_summary) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    # Create labels with weekday
+    labels = [
+        f"{row['date_str'][4:6]}/{row['date_str'][6:]}({row['weekday']})"
+        for _, row in daily_summary.iterrows()
+    ]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Bar chart for trips
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=daily_summary["trip_count"],
+            name="운행 횟수",
+            marker_color=COLORS["primary"],
+            opacity=0.8,
+            hovertemplate="%{x}<br>운행: %{y}회<extra></extra>",
+        ),
+        secondary_y=False
+    )
+
+    # Line chart for passengers
+    fig.add_trace(
+        go.Scatter(
+            x=labels,
+            y=daily_summary["passenger_count"],
+            name="탑승 인원",
+            mode="lines+markers",
+            line=dict(color=COLORS["success"], width=3),
+            marker=dict(size=10),
+            hovertemplate="%{x}<br>탑승: %{y}명<extra></extra>",
+        ),
+        secondary_y=True
+    )
+
+    fig.update_layout(
+        title="일별 운행/탑승 추이",
+        xaxis_title="날짜",
+        height=400,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        barmode="group",
+    )
+
+    fig.update_yaxes(title_text="운행 횟수", secondary_y=False)
+    fig.update_yaxes(title_text="탑승 인원", secondary_y=True)
+
+    return apply_dark_layout(fig)
+
+
+def create_building_daily_chart(
+    building_daily: "pd.DataFrame"
+) -> go.Figure:
+    """
+    Create stacked bar chart for daily trips by building
+
+    Args:
+        building_daily: DataFrame with date_str, building_name, trip_count
+
+    Returns:
+        Stacked bar chart
+    """
+    if len(building_daily) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    # Get unique dates and buildings
+    dates = sorted(building_daily["date_str"].unique())
+    buildings = sorted(building_daily["building_name"].unique())
+
+    # Create labels
+    labels = [f"{d[4:6]}/{d[6:]}" for d in dates]
+
+    fig = go.Figure()
+
+    for building in buildings:
+        bldg_data = building_daily[building_daily["building_name"] == building]
+        values = []
+        for date in dates:
+            row = bldg_data[bldg_data["date_str"] == date]
+            values.append(row["trip_count"].sum() if len(row) > 0 else 0)
+
+        fig.add_trace(go.Bar(
+            name=building,
+            x=labels,
+            y=values,
+            marker_color=BUILDING_COLORS.get(building, COLORS["secondary"]),
+            hovertemplate=f"{building}<br>%{{x}}<br>운행: %{{y}}회<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title="건물별 일별 운행",
+        xaxis_title="날짜",
+        yaxis_title="운행 횟수",
+        barmode="stack",
+        height=400,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+        ),
+    )
+
+    return apply_dark_layout(fig)
+
+
+def create_hourly_overlay_chart(
+    hourly_comparison: "pd.DataFrame",
+    hourly_average: "pd.DataFrame",
+    selected_date: str = None
+) -> go.Figure:
+    """
+    Create hourly passenger overlay chart
+
+    Args:
+        hourly_comparison: DataFrame with date_str, hour, passenger_count
+        hourly_average: DataFrame with hour, avg_passengers
+        selected_date: Date to highlight
+
+    Returns:
+        Multi-line chart
+    """
+    if len(hourly_comparison) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    fig = go.Figure()
+
+    # Get unique dates
+    dates = sorted(hourly_comparison["date_str"].unique())
+    date_colors = ["#60A5FA", "#34D399", "#FBBF24", "#F87171", "#A78BFA"]
+
+    # Add line for each date
+    for i, date_str in enumerate(dates):
+        date_data = hourly_comparison[hourly_comparison["date_str"] == date_str]
+        date_data = date_data.sort_values("hour")
+
+        # Label with weekday
+        try:
+            from datetime import datetime as dt
+            weekday_names = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+            parsed = dt.strptime(date_str, "%Y%m%d")
+            weekday = weekday_names.get(parsed.weekday(), "")
+            label = f"{date_str[4:6]}/{date_str[6:]}({weekday})"
+        except Exception:
+            label = date_str
+
+        line_width = 3 if date_str == selected_date else 1.5
+        opacity = 1.0 if date_str == selected_date else 0.6
+
+        fig.add_trace(go.Scatter(
+            x=date_data["hour"],
+            y=date_data["passenger_count"],
+            name=label,
+            mode="lines+markers",
+            line=dict(color=date_colors[i % len(date_colors)], width=line_width),
+            marker=dict(size=6),
+            opacity=opacity,
+            hovertemplate=f"{label}<br>%{{x}}:00<br>탑승: %{{y}}명<extra></extra>",
+        ))
+
+    # Add average line if available
+    if len(hourly_average) > 0:
+        avg_data = hourly_average.sort_values("hour")
+        fig.add_trace(go.Scatter(
+            x=avg_data["hour"],
+            y=avg_data["avg_passengers"],
+            name="평균",
+            mode="lines",
+            line=dict(color="#FAFAFA", width=3, dash="dash"),
+            hovertemplate="평균<br>%{x}:00<br>탑승: %{y:.0f}명<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title="시간대별 탑승인원 비교",
+        xaxis_title="시간",
+        yaxis_title="탑승 인원",
+        height=400,
+        xaxis=dict(
+            tickmode="linear",
+            tick0=0,
+            dtick=2,
+            range=[-0.5, 23.5],
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+        ),
+    )
+
+    return apply_dark_layout(fig)
+
+
+def create_date_hour_heatmap(
+    heatmap_data: "pd.DataFrame",
+    metric_label: str = "탑승인원"
+) -> go.Figure:
+    """
+    Create date x hour heatmap
+
+    Args:
+        heatmap_data: Pivot DataFrame (index=date, columns=hour)
+        metric_label: Label for color scale
+
+    Returns:
+        Heatmap
+    """
+    if len(heatmap_data) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    # Create y labels with weekday
+    y_labels = []
+    weekday_names = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+    for date_str in heatmap_data.index:
+        try:
+            from datetime import datetime as dt
+            parsed = dt.strptime(str(date_str), "%Y%m%d")
+            weekday = weekday_names.get(parsed.weekday(), "")
+            y_labels.append(f"{date_str[4:6]}/{date_str[6:]}({weekday})")
+        except Exception:
+            y_labels.append(str(date_str))
+
+    # X labels (hours)
+    x_labels = [f"{h}:00" for h in heatmap_data.columns]
+
+    # Create hover texts
+    hover_texts = []
+    for i, date_str in enumerate(heatmap_data.index):
+        row_texts = []
+        for j, hour in enumerate(heatmap_data.columns):
+            value = heatmap_data.iloc[i, j]
+            row_texts.append(f"{y_labels[i]} {hour}:00<br>{metric_label}: {value:.0f}")
+        hover_texts.append(row_texts)
+
+    fig = go.Figure(data=go.Heatmap(
+        z=heatmap_data.values,
+        x=x_labels,
+        y=y_labels,
+        colorscale="RdYlGn_r",
+        zmin=0,
+        zmax=max(20, heatmap_data.values.max()) if heatmap_data.values.size > 0 else 20,
+        hovertext=hover_texts,
+        hoverinfo="text",
+        colorbar=dict(title=metric_label),
+    ))
+
+    fig.update_layout(
+        title=f"날짜 x 시간 {metric_label} 히트맵",
+        xaxis_title="시간",
+        yaxis_title="날짜",
+        height=max(300, 60 * len(heatmap_data) + 100),
+    )
+
+    return apply_dark_layout(fig)
+
+
+def create_hoist_utilization_heatmap(
+    hoist_daily: "pd.DataFrame"
+) -> go.Figure:
+    """
+    Create hoist utilization heatmap
+
+    Args:
+        hoist_daily: DataFrame with hoist_name, date_str, utilization_rate
+
+    Returns:
+        Heatmap (hoist x date)
+    """
+    if len(hoist_daily) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    # Pivot data
+    pivot = hoist_daily.pivot(
+        index="hoist_name",
+        columns="date_str",
+        values="utilization_rate"
+    ).fillna(0)
+
+    # Sort hoists by building
+    pivot = pivot.sort_index()
+
+    # Create labels
+    y_labels = [format_hoist_name(h) + f" ({h.split('_')[0]})" for h in pivot.index]
+    x_labels = [f"{d[4:6]}/{d[6:]}" for d in pivot.columns]
+
+    # Hover texts
+    hover_texts = []
+    for i, hoist in enumerate(pivot.index):
+        row_texts = []
+        for j, date in enumerate(pivot.columns):
+            value = pivot.iloc[i, j] * 100
+            row_texts.append(f"{hoist}<br>{date[4:6]}/{date[6:]}<br>가동률: {value:.1f}%")
+        hover_texts.append(row_texts)
+
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot.values * 100,  # Convert to percentage
+        x=x_labels,
+        y=y_labels,
+        colorscale="Blues",
+        zmin=0,
+        zmax=100,
+        hovertext=hover_texts,
+        hoverinfo="text",
+        colorbar=dict(title="가동률 (%)", ticksuffix="%"),
+    ))
+
+    fig.update_layout(
+        title="호이스트 가동률 히트맵",
+        xaxis_title="날짜",
+        yaxis_title="",
+        height=max(350, 40 * len(pivot) + 100),
+    )
+
+    return apply_dark_layout(fig)
+
+
+def create_hoist_avg_passengers_chart(
+    hoist_summary: "pd.DataFrame"
+) -> go.Figure:
+    """
+    Create horizontal bar chart for average passengers per hoist
+
+    Args:
+        hoist_summary: DataFrame with hoist_name, avg_passengers_per_trip, building_name
+
+    Returns:
+        Horizontal bar chart
+    """
+    if len(hoist_summary) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    # Sort by avg passengers
+    df = hoist_summary.sort_values("avg_passengers_per_trip", ascending=True)
+
+    # Create short labels
+    labels = [format_hoist_name(h) for h in df["hoist_name"]]
+    colors = [BUILDING_COLORS.get(b, COLORS["secondary"]) for b in df["building_name"]]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        y=labels,
+        x=df["avg_passengers_per_trip"],
+        orientation="h",
+        marker_color=colors,
+        text=[f"{v:.1f}명" for v in df["avg_passengers_per_trip"]],
+        textposition="outside",
+        hovertemplate="%{y}<br>평균 탑승: %{x:.1f}명<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title="호이스트별 평균 탑승인원",
+        xaxis_title="평균 탑승인원 (명)",
+        yaxis_title="",
+        height=max(300, 40 * len(df) + 100),
+    )
+
+    return apply_dark_layout(fig)
+
+
+def create_hoist_peak_passengers_chart(
+    hoist_summary: "pd.DataFrame"
+) -> go.Figure:
+    """
+    Create horizontal bar chart for peak passengers per hoist
+
+    Args:
+        hoist_summary: DataFrame with hoist_name, peak_passengers, building_name
+
+    Returns:
+        Horizontal bar chart
+    """
+    if len(hoist_summary) == 0:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    # Sort by peak passengers
+    df = hoist_summary.sort_values("peak_passengers", ascending=True)
+
+    # Create short labels
+    labels = [format_hoist_name(h) for h in df["hoist_name"]]
+    colors = [BUILDING_COLORS.get(b, COLORS["secondary"]) for b in df["building_name"]]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        y=labels,
+        x=df["peak_passengers"],
+        orientation="h",
+        marker_color=colors,
+        text=[f"{int(v)}명" for v in df["peak_passengers"]],
+        textposition="outside",
+        hovertemplate="%{y}<br>최대 탑승: %{x}명<extra></extra>",
+    ))
+
+    # Add capacity line
+    fig.add_vline(
+        x=25,
+        line_dash="dash",
+        line_color="#EF4444",
+        annotation_text="정원(25명)",
+        annotation_position="top right",
+    )
+
+    fig.update_layout(
+        title="호이스트별 피크 탑승인원",
+        xaxis_title="최대 탑승인원 (명)",
+        yaxis_title="",
+        height=max(300, 40 * len(df) + 100),
+    )
+
+    return apply_dark_layout(fig)
+
+
+def create_load_distribution_pie(
+    load_distribution: dict
+) -> go.Figure:
+    """
+    Create pie chart for hoist load distribution
+
+    Args:
+        load_distribution: Dict with "distribution", "dominant_hoist", "dominant_share"
+
+    Returns:
+        Pie chart
+    """
+    distribution = load_distribution.get("distribution", {})
+
+    if not distribution:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    labels = [format_hoist_name(h) for h in distribution.keys()]
+    values = [v * 100 for v in distribution.values()]
+    full_names = list(distribution.keys())
+
+    # Get colors by building
+    colors = []
+    for name in distribution.keys():
+        building = name.split("_")[0] if "_" in name else ""
+        colors.append(BUILDING_COLORS.get(building, COLORS["secondary"]))
+
+    fig = go.Figure(data=go.Pie(
+        labels=labels,
+        values=values,
+        marker=dict(colors=colors),
+        textinfo="label+percent",
+        textposition="inside",
+        hovertemplate="%{label}<br>%{value:.1f}%<extra></extra>",
+        hole=0.4,
+    ))
+
+    dominant = load_distribution.get("dominant_hoist", "")
+    dominant_share = load_distribution.get("dominant_share", 0)
+
+    fig.update_layout(
+        title=f"호이스트 부하 분포",
+        annotations=[dict(
+            text=f"{format_hoist_name(dominant) if dominant else ''}<br>{dominant_share:.0f}%",
+            x=0.5, y=0.5,
+            font_size=16,
+            showarrow=False,
+            font_color="#FAFAFA",
+        )],
+        height=400,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.1,
+        ),
+    )
+
+    return apply_dark_layout(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Wait Congestion Charts
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def create_wait_congestion_chart(
+    bin_summary: Dict,
+    bin_minutes: int = 10,
+) -> go.Figure:
+    """
+    시간대별 대기 혼잡도 종합 차트 (10분 단위)
+
+    좌축: 동시 대기 인원 (영역) + 트립당 평균 탑승 (막대)
+    우축: 트립 간격 (선)
+
+    Args:
+        bin_summary: {time_bin: {avg_waiters, avg_pax_per_trip, ...}}
+                     time_bin은 minutes from midnight (0, 10, 20, ...)
+        bin_minutes: bin 크기
+
+    Returns:
+        Plotly figure with dual y-axes
+    """
+    if not bin_summary:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="혼잡도 데이터 없음",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(color="#64748B", size=14)
+        )
+        return apply_dark_layout(fig)
+
+    bins = sorted(bin_summary.keys())
+    x_labels = [f"{b // 60:02d}:{b % 60:02d}" for b in bins]
+
+    avg_waiters = [bin_summary[b].get("avg_waiters", 0) for b in bins]
+    avg_pax = [bin_summary[b].get("avg_pax_per_trip", 0) for b in bins]
+    max_pax = [bin_summary[b].get("max_pax_per_trip", 0) for b in bins]
+    avg_queue = [bin_summary[b].get("avg_waiters", 0) for b in bins]
+    avg_gap = [bin_summary[b].get("avg_trip_gap_sec", 0) / 60 for b in bins]
+    levels = [bin_summary[b].get("congestion_level", "LOW") for b in bins]
+    total_trips = [bin_summary[b].get("total_trips", 0) for b in bins]
+    total_pax_list = [bin_summary[b].get("total_passengers", 0) for b in bins]
+
+    # 막대 색상 (혼잡도 레벨)
+    level_colors = {
+        "HIGH": COLORS["danger"],
+        "MEDIUM": COLORS["warning"],
+        "LOW": COLORS["secondary"],
+    }
+    bar_colors = [level_colors.get(l, COLORS["secondary"]) for l in levels]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # 동시 대기 인원 (영역)
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels, y=avg_waiters,
+            name="동시 대기 인원",
+            mode="lines",
+            fill="tozeroy",
+            line=dict(color="#F59E0B", width=2),
+            fillcolor="rgba(245,158,11,0.15)",
+            hovertemplate="%{x}<br>동시 대기: %{y:.1f}명<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+
+    # 트립당 평균 탑승 (막대)
+    fig.add_trace(
+        go.Bar(
+            x=x_labels, y=avg_pax,
+            name="트립당 평균 탑승",
+            marker_color=bar_colors,
+            opacity=0.7,
+            customdata=list(zip(max_pax, total_trips, total_pax_list, levels)),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "평균: %{y:.1f}명/트립<br>"
+                "최대: %{customdata[0]}명/트립<br>"
+                "운행: %{customdata[1]}회<br>"
+                "총 탑승: %{customdata[2]}명<br>"
+                "혼잡도: %{customdata[3]}"
+                "<extra></extra>"
+            ),
+        ),
+        secondary_y=False,
+    )
+
+    # 트립 간격 (우축, 선)
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels, y=avg_gap,
+            name="트립 간격 (분)",
+            mode="lines+markers",
+            line=dict(color="#60A5FA", width=2, dash="dot"),
+            marker=dict(size=3),
+            hovertemplate="%{x}<br>간격: %{y:.1f}분<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    fig = apply_dark_layout(fig)
+    fig.update_layout(
+        title=f"시간대별 대기 혼잡도 ({bin_minutes}분 단위)",
+        height=400,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        bargap=0.15,
+    )
+    fig.update_xaxes(
+        title_text="시간",
+        tickangle=-45,
+        dtick=6,  # 매 1시간(6×10분)마다 레이블
+    )
+    fig.update_yaxes(title_text="인원 (명)", secondary_y=False)
+    fig.update_yaxes(title_text="트립 간격 (분)", secondary_y=True)
+
+    return fig
+
+
+def create_congestion_clearance_chart(
+    bin_summary: Dict[int, Dict],
+    bin_minutes: int = 10,
+) -> go.Figure:
+    """
+    혼잡 해소 속도 차트 (10분 단위)
+
+    X: 시간 bin, Y: 혼잡 해소 예상 시간 (분)
+    막대 색상: 혼잡도 레벨
+
+    Args:
+        bin_summary: {time_bin: {...}} — 10분 단위
+        bin_minutes: bin 크기
+    """
+    if not bin_summary:
+        fig = go.Figure()
+        return apply_dark_layout(fig)
+
+    bins = sorted(bin_summary.keys())
+    x_labels = [f"{b // 60:02d}:{b % 60:02d}" for b in bins]
+
+    clearance = [bin_summary[b].get("avg_clearance_min", 0) for b in bins]
+    levels = [bin_summary[b].get("congestion_level", "LOW") for b in bins]
+    queues = [bin_summary[b].get("avg_waiters", 0) for b in bins]
+    gaps = [bin_summary[b].get("avg_trip_gap_sec", 0) for b in bins]
+
+    level_colors = {
+        "HIGH": COLORS["danger"],
+        "MEDIUM": COLORS["warning"],
+        "LOW": COLORS["secondary"],
+    }
+    bar_colors = [level_colors.get(l, COLORS["secondary"]) for l in levels]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=x_labels, y=clearance,
+        name="혼잡 해소 시간",
+        marker_color=bar_colors,
+        customdata=list(zip(queues, gaps, levels)),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "해소 시간: %{y:.1f}분<br>"
+            "동시 대기: %{customdata[0]:.1f}명<br>"
+            "트립 간격: %{customdata[1]:.0f}초<br>"
+            "혼잡도: %{customdata[2]}"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_dark_layout(fig)
+    fig.update_layout(
+        title=f"시간대별 혼잡 해소 예상 시간 ({bin_minutes}분 단위)",
+        xaxis_title="시간",
+        yaxis_title="해소 시간 (분)",
+        height=350,
+        bargap=0.15,
+    )
+    fig.update_xaxes(tickangle=-45, dtick=6)
+
+    return fig
